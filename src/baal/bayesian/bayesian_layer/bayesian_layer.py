@@ -46,39 +46,73 @@ class BayesianLayer(nn.Module):
 
         Args:
             x (Tensor): input
-
-        Returns:
-            x (Tensor): output
-
-        Raises:
-            ExceptionError: if the layer is not among "Linear, Conv1d or Conv2d".
         """
 
-        sig_weight = torch.exp(self.weight_sigma)
-        weight = self.weight_mu + sig_weight * self.eps_weight.normal_()
-
-        if isinstance(self.layer, nn.Linear):
-            x = F.linear(x, weight, bias=None)
-
-        elif isinstance(self.layer, nn.Conv1d):
-            x = F.conv1d(x, weight, bias=None)
-
-        elif isinstance(self.layer, nn.Conv2d):
-            kwargs = self.layer.__dict__
-            wanted = ['stride', 'dilation', 'padding', 'groups']
-            kwargs = {k: v for k, v in kwargs.items() if k in wanted}
-            x = F.conv2d(x, weight, bias=None, **kwargs)
-
-        else:
-            raise Exception('This layer type is not supported')
-        return x
+        raise NotImplementedError
 
     def regularization(self):
         sig_weight = torch.exp(self.weight_sigma)
-        kl_ = math.log(self.q_logvar_init) - self.weight_sigma + (sig_weight**2 + self.weight_mu**2) / \
-            (2 * self.q_logvar_init ** 2) - 0.5
+        kl_ = math.log(self.q_logvar_init) - self.weight_sigma +\
+            (sig_weight**2 + self.weight_mu**2) / (2 * self.q_logvar_init ** 2) - 0.5
         kl = kl_.sum()
         return kl
+
+
+class LinearBayesianLayer(BayesianLayer):
+    def forward(self, x):
+        """
+        estimating the weights distribution and update the \
+        weights before calling the layer actual forward pass.
+
+        Args:
+            x (Tensor): input
+
+        Returns:
+            x (Tensor): output
+        """
+        sig_weight = torch.exp(self.weight_sigma)
+        weight = self.weight_mu + sig_weight * self.eps_weight.normal_()
+        x = F.linear(x, weight, bias=None)
+        return x
+
+
+class Conv1dBayesianLayer(BayesianLayer):
+    def forward(self, x):
+        """
+        estimating the weights distribution and update the \
+        weights before calling the layer actual forward pass.
+
+        Args:
+            x (Tensor): input
+
+        Returns:
+            x (Tensor): output
+        """
+        sig_weight = torch.exp(self.weight_sigma)
+        weight = self.weight_mu + sig_weight * self.eps_weight.normal_()
+        x = F.conv1d(x, weight, bias=None)
+        return x
+
+
+class Conv2dBayesianLayer(BayesianLayer):
+    def forward(self, x):
+        """
+        estimating the weights distribution and update the \
+        weights before calling the layer actual forward pass.
+
+        Args:
+            x (Tensor): input
+
+        Returns:
+            x (Tensor): output
+        """
+        sig_weight = torch.exp(self.weight_sigma)
+        weight = self.weight_mu + sig_weight * self.eps_weight.normal_()
+        kwargs = self.layer.__dict__
+        wanted = ['stride', 'dilation', 'padding', 'groups']
+        kwargs = {k: v for k, v in kwargs.items() if k in wanted}
+        x = F.conv2d(x, weight, bias=None, **kwargs)
+        return x
 
 
 def patch_module(module: torch.nn.Module,
@@ -114,22 +148,26 @@ def _patch_bayesian_layers(module: torch.nn.Module, q_logvar_init=1.0, p_logvar_
     layer to be wrapped by BayesianLayer.
     """
     for name, child in module.named_children():
-        if isinstance(child, nn.Linear) or isinstance(child, nn.Conv2d) \
-                or isinstance(child, nn.Conv1d):
-
-            new_module = BayesianLayer(child,
-                                       q_logvar_init=q_logvar_init,
-                                       p_logvar_init=p_logvar_init)
-
-            module.add_module(name, new_module)
+        if isinstance(child, nn.Linear):
+            new_module = LinearBayesianLayer(child,
+                                             q_logvar_init=q_logvar_init,
+                                             p_logvar_init=p_logvar_init)
+        elif isinstance(child, nn.Conv2d):
+            new_module = Conv2dBayesianLayer(child,
+                                             q_logvar_init=q_logvar_init,
+                                             p_logvar_init=p_logvar_init)
+        elif isinstance(child, nn.Conv1d):
+            new_module = Conv1dBayesianLayer(child,
+                                             q_logvar_init=q_logvar_init,
+                                             p_logvar_init=p_logvar_init)
 
         if isinstance(child, nn.Dropout):
             new_module = torch.nn.Dropout(p=0)
-            module.add_module(name, new_module)
 
         if isinstance(child, nn.ReLU):
             new_module = nn.Softplus()
-            module.add_module(name, new_module)
+
+        module.add_module(name, new_module)
         _patch_bayesian_layers(child)
 
 

@@ -2,7 +2,7 @@ import unittest
 import pytest
 import torch.nn as nn
 
-from baal.bayesian.bayesian_layer import BayesianModel, BayesianLayer
+from baal.bayesian.bayesian_layer import BayesianModel, LinearBayesianLayer
 
 
 class DummyModel(nn.Module):
@@ -25,9 +25,9 @@ class BayesianWrapperTest(unittest.TestCase):
         self.bayes_model = BayesianModel(model)
 
     def test_layer_is_changed(self):
-        assert isinstance(self.bayes_model.model.l1, BayesianLayer)
+        assert isinstance(self.bayes_model.model.l1, LinearBayesianLayer)
         assert isinstance(self.bayes_model.model.r1, nn.Softplus)
-        assert isinstance(self.bayes_model.model.l2, BayesianLayer)
+        assert isinstance(self.bayes_model.model.l2, LinearBayesianLayer)
         assert hasattr(self.bayes_model.model.l1, 'regularization')
         assert hasattr(self.bayes_model.model.l2, 'regularization')
 

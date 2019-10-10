@@ -3,6 +3,7 @@ import structlog
 from torch.autograd import Variable
 
 from baal.modelwrapper import ModelWrapper
+from baal.bayesian.bayesian_layer import LinearBayesianLayer
 
 log = structlog.get_logger("ModelWrapper")
 
@@ -45,8 +46,7 @@ class BayesianWrapper(ModelWrapper):
         if cuda:
             regularizer = regularizer.cuda()
 
-        loss = self.criterion(outputs, target) + \
-               beta * regularizer
+        loss = self.criterion(outputs, target) + beta * regularizer
 
         print("loss before:", loss)
         loss.backward()
@@ -112,10 +112,7 @@ class BayesianWrapper(ModelWrapper):
 
     def reset_last_module(self):
         def reset(m):
-            _, child = list(zip(*m.named_childern()))[-1]
-            if len(list(child.named_children())) == 0:
-                child.reset_parameters()
-            reset(child)
+            if isinstance(m, LinearBayesianLayer):
+                m.reset_parameters()
         self.model.apply(reset)
-
-
+        self.reset_fcs()

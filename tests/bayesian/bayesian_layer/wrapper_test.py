@@ -63,7 +63,24 @@ class BayesianWrapperTest(unittest.TestCase):
         # check the predictions are different for different iterations of same batch
         assert any([not torch.allclose(pred1[..., i], pred1[..., j]) for i in range(10) for j in range(10)])
 
-    #TODO: Add test for reset_last_module()
+    def test_reset_last_module(self):
+        last_module = self.model.model.l2
+
+        last_module_params = list(map(lambda x: x.clone(), last_module.parameters()))
+
+        input, target = torch.randn(1, 10), torch.randn(1, 1)
+        self.wrapper.train_on_batch(input, target, self.optim)
+        after_train_params = list(map(lambda x: x.clone(), last_module.parameters()))
+
+        self.wrapper.reset_last_module()
+        new_last_module_params = list(map(lambda x: x.clone(), last_module.parameters()))
+
+
+        assert any([not torch.allclose(i, j) for i, j in zip(last_module_params, after_train_params)])
+        assert any([not torch.allclose(i, j) for i, j in zip(after_train_params, new_last_module_params)])
+
+        # parameters of bayesian_layer would reintialize randomly but not to the initial values
+        assert any ([not torch.allclose(i, j) for i, j in zip(last_module_params, new_last_module_params)])
 
 if __name__ == '__main__':
     pytest.main()
