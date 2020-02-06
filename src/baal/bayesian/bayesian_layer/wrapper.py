@@ -1,9 +1,12 @@
-import torch
+from copy import deepcopy
+from typing import Optional, Callable
+
 import structlog
-from torch.autograd import Variable
+import torch
+from torch.optim import Optimizer
+from torch.utils.data import Dataset
 
 from baal.modelwrapper import ModelWrapper
-from baal.bayesian.bayesian_layer import LinearBayesianLayer
 
 log = structlog.get_logger("ModelWrapper")
 
@@ -26,42 +29,39 @@ class BayesianWrapper(ModelWrapper):
     Returns:
         Tensor , computed bayesian loss
     """
-    def __init__(self, model, criterion, beta=1):
+
+    def __init__(self, model, criterion, beta=1e-4):
         super(BayesianWrapper, self).__init__(model, criterion)
 
         self.beta = beta
 
     def train_on_batch(self, data, target, optimizer, cuda=False):
-
-        data, target = Variable(data), Variable(target)
         beta = self.beta / data.size(0)
 
         if cuda:
             data, target = data.cuda(), target.cuda()
             self.model.cuda()
         optimizer.zero_grad()
-        outputs = self.model(data)
-        regularizer = Variable(self.model.regularization())
+        output = self.model(data)
+        regularizer = self.model.regularization()
 
-        if cuda:
-            regularizer = regularizer.cuda()
-
-        loss = self.criterion(outputs, target) + beta * regularizer
-
-        print("loss before:", loss)
+        loss = self.criterion(output, target) + beta * regularizer
         loss.backward()
-
-        # gradient clip to prevent gradient overflow
-        torch.nn.utils.clip_grad_value_(self.model.parameters(), 5)
+        torch.nn.utils.clip_grad_norm(self.model.parameters(), 50)
+        # print("total_norm_after: ", total_norm)
         optimizer.step()
+        self._update_metrics(output, target, loss, filter='train')
+        optimizer.zero_grad()
+        # print("are we ok with the list of loss:", self.metrics['train_loss'].loss)
+        # print("are we ok with the avg loss:", self.metrics['train_loss'].value)
         return loss
 
     def test_on_batch(
-            self,
-            data: torch.Tensor,
-            target: torch.Tensor,
-            cuda: bool = False,
-            average_predictions=1
+        self,
+        data: torch.Tensor,
+        target: torch.Tensor,
+        cuda: bool = False,
+        average_predictions=1
     ):
         """
         Test the current model on a batch.
@@ -74,45 +74,23 @@ class BayesianWrapper(ModelWrapper):
         Returns:
             Tensor, the loss computed from the criterion.
         """
+        beta = self.beta / data.size(0)
         with torch.no_grad():
             if cuda:
                 data, target = data.cuda(), target.cuda()
             if average_predictions == 1:
-
-                # the regularization loss is used only for training
-                return self.criterion(self.model(data), target)
-            else:
-                raise Exception("BayesianWrapper doesn't support this functionality")
-
-    def predict_on_batch(self, data, cuda=False, iterations=1, average_predictions=1):
-        """
-        Get the model's prediction on a batch.
-
-        Args:
-            data (Tensor): the model input
-            iterations (int): number of prediction to perform.
-            cuda (bool): use cuda or not
-
-        Returns:
-            Tensor, the loss computed from the criterion.
-                    shape = {batch_size, nclass, n_iteration}
-        """
-        with torch.no_grad():
-            if cuda:
-                data = data.cuda()
-
-            if average_predictions == 1:
-                outputs = []
-                for _ in range(iterations):
-                    out = self.model(data)
-                    outputs.append(out)
-                return torch.stack(outputs, dim=-1)
-            else:
-                raise Exception("BayesianWrapper doesn't support this functionality")
+                preds = self.model(data)
+                loss = self.criterion(preds, target)
+            elif average_predictions > 1:
+                raise NotImplementedError
+            self._update_metrics(preds.cpu(), target.cpu(), loss, 'test')
+            return loss
 
     def reset_last_module(self):
         def reset(m):
-            if isinstance(m, LinearBayesianLayer):
-                m.reset_parameters()
+            _, child = list(zip(*m.named_childern()))[-1]
+            if len(list(child.named_children())) == 0:
+                child.reset_parameters()
+            reset(child)
+
         self.model.apply(reset)
-        self.reset_fcs()

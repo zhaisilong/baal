@@ -2,12 +2,12 @@
     https://github.com/kumar-shridhar/PyTorch-BayesianCNN/blob/master/\
     Image%20Recognition/utils/BBBlayers.py"""
 
-import math
 import copy
+import math
 from copy import deepcopy
+
 import torch
 import torch.nn as nn
-
 import torch.nn.functional as F
 from torch.nn import Parameter
 
@@ -21,7 +21,8 @@ class BayesianLayer(nn.Module):
             p_logvar_init (float): initial value for variance of p
 
     """
-    def __init__(self, layer, q_logvar_init=1.0, p_logvar_init=1.0):
+
+    def __init__(self, layer, q_logvar_init=0.5, p_logvar_init=0.5):
         super(BayesianLayer, self).__init__()
 
         self.q_logvar_init = torch.as_tensor(q_logvar_init)
@@ -52,8 +53,8 @@ class BayesianLayer(nn.Module):
 
     def regularization(self):
         sig_weight = torch.exp(self.weight_sigma)
-        kl_ = math.log(self.q_logvar_init) - self.weight_sigma +\
-            (sig_weight**2 + self.weight_mu**2) / (2 * self.q_logvar_init ** 2) - 0.5
+        kl_ = math.log(self.q_logvar_init) - self.weight_sigma + \
+              (sig_weight ** 2 + self.weight_mu ** 2) / (2 * self.q_logvar_init ** 2) - 0.5
         kl = kl_.sum()
         return kl
 
@@ -115,13 +116,12 @@ class Conv2dBayesianLayer(BayesianLayer):
         return x
 
 
-def patch_module(module: torch.nn.Module,
-                 q_logvar_init=1.0,
-                 p_logvar_init=1.0,
-                 inplace: bool = True) -> torch.nn.Module:
+def patch_module(module: torch.nn.Module, q_logvar_init=1.0, p_logvar_init=1.0,
+                 inplace: bool = True, types='all') -> torch.nn.Module:
     """Replace last layer in a model with Bayesian layer.
 
     Args:
+        types (str): One of 'all', 'linear', 'conv', the type of layers to modifies.
         module (torch.nn.Module):
             The module in which you would like to replace dropout layers.
         q_logvar_init (float): initial value for variance of q
@@ -137,26 +137,34 @@ def patch_module(module: torch.nn.Module,
     if not inplace:
         module = copy.deepcopy(module)
 
-    _patch_bayesian_layers(module, q_logvar_init=q_logvar_init, p_logvar_init=p_logvar_init)
+    _patch_bayesian_layers(module, q_logvar_init=q_logvar_init, p_logvar_init=p_logvar_init,
+                           types=types)
 
     return module
 
 
-def _patch_bayesian_layers(module: torch.nn.Module, q_logvar_init=1.0, p_logvar_init=1.0) -> None:
+def _patch_bayesian_layers(module: torch.nn.Module, q_logvar_init=1.0, p_logvar_init=1.0,
+                           types='all') -> None:
     """
     Recursively iterate over the children of a module and find the last
     layer to be wrapped by BayesianLayer.
     """
+    assert types in ['all', 'linear', 'conv']
+    layer_met = False
     for name, child in module.named_children():
-        if isinstance(child, nn.Linear):
+        new_module = None
+        if isinstance(child, nn.Linear) and types in ['all', 'linear']:
+            layer_met = True
             new_module = LinearBayesianLayer(child,
                                              q_logvar_init=q_logvar_init,
                                              p_logvar_init=p_logvar_init)
-        elif isinstance(child, nn.Conv2d):
+        elif isinstance(child, nn.Conv2d) and types in ['all', 'conv']:
+            layer_met = True
             new_module = Conv2dBayesianLayer(child,
                                              q_logvar_init=q_logvar_init,
                                              p_logvar_init=p_logvar_init)
-        elif isinstance(child, nn.Conv1d):
+        elif isinstance(child, nn.Conv1d) and types in ['all', 'conv']:
+            layer_met = True
             new_module = Conv1dBayesianLayer(child,
                                              q_logvar_init=q_logvar_init,
                                              p_logvar_init=p_logvar_init)
@@ -164,10 +172,10 @@ def _patch_bayesian_layers(module: torch.nn.Module, q_logvar_init=1.0, p_logvar_
         if isinstance(child, nn.Dropout):
             new_module = torch.nn.Dropout(p=0)
 
-        if isinstance(child, nn.ReLU):
+        if isinstance(child, nn.ReLU) and layer_met:
             new_module = nn.Softplus()
-
-        module.add_module(name, new_module)
+        if new_module is not None:
+            module.add_module(name, new_module)
         _patch_bayesian_layers(child)
 
 
@@ -180,9 +188,11 @@ class BayesianModel(nn.Module):
         p_logvar_init (float): initial value for variance of p
 
     """
-    def __init__(self, model: nn.Module, q_logvar_init=1.0, p_logvar_init=1.0):
+
+    def __init__(self, model: nn.Module, q_logvar_init=1.0, p_logvar_init=1.0, types='all'):
         super(BayesianModel, self).__init__()
-        self.model = patch_module(model, q_logvar_init=q_logvar_init, p_logvar_init=p_logvar_init)
+        self.model = patch_module(model, q_logvar_init=q_logvar_init, p_logvar_init=p_logvar_init,
+                                  types=types)
 
     def forward(self, x):
         return self.model(x)

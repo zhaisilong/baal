@@ -150,11 +150,13 @@ class ModelWrapper:
                                    collate_fn: Optional[Callable] = None,
                                    return_best_weights=False,
                                    patience=None,
-                                   min_epoch_for_es=0):
+                                   min_epoch_for_es=0,
+                                   test_every=1):
         """
         Train and test the model on both Dataset `train_dataset`, `test_dataset`.
 
         Args:
+
             train_dataset (Dataset): Dataset to train on.
             test_dataset (Dataset): Dataset to evaluate on.
             optimizer (Optimizer): Optimizer to use during training.
@@ -167,6 +169,7 @@ class ModelWrapper:
             patience (Optional[int]): If provided, will use early stopping to stop after
                                         `patience` epoch without improvement.
             min_epoch_for_es (int): Epoch at which the early stopping starts.
+            test_every (int): Will run evaluation after each `test_every` training epoch.
 
         Returns:
             History and best weights if required.
@@ -175,8 +178,8 @@ class ModelWrapper:
         best_loss = 1e10
         best_epoch = 0
         hist = []
-        for e in range(epoch):
-            _ = self.train_on_dataset(train_dataset, optimizer, batch_size, 1,
+        for e in range(0, epoch, test_every):
+            _ = self.train_on_dataset(train_dataset, optimizer, batch_size, test_every,
                                       use_cuda, workers, collate_fn)
             te_loss = self.test_on_dataset(test_dataset, batch_size, use_cuda, workers, collate_fn)
             hist.append({k: v.value for k, v in self.metrics.items()})
@@ -375,6 +378,7 @@ class ModelWrapper:
 
     def reset_fcs(self):
         """Reset all torch.nn.Linear layers."""
+
         def reset(m):
             if isinstance(m, torch.nn.Linear):
                 m.reset_parameters()
@@ -383,6 +387,7 @@ class ModelWrapper:
 
     def reset_all(self):
         """Reset all *resetable* layers."""
+
         def reset(m):
             for m in self.model.modules():
                 getattr(m, 'reset_parameters', lambda: None)()
