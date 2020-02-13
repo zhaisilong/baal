@@ -36,8 +36,6 @@ class BayesianWrapper(ModelWrapper):
         self.beta = beta
 
     def train_on_batch(self, data, target, optimizer, cuda=False):
-        beta = self.beta / data.size(0)
-
         if cuda:
             data, target = data.cuda(), target.cuda()
             self.model.cuda()
@@ -45,9 +43,9 @@ class BayesianWrapper(ModelWrapper):
         output = self.model(data)
         regularizer = self.model.regularization()
 
-        loss = self.criterion(output, target) + beta * regularizer
+        loss = self.criterion(output, target) + self.beta * regularizer
         loss.backward()
-        torch.nn.utils.clip_grad_norm(self.model.parameters(), 50)
+        # torch.nn.utils.clip_grad_norm(self.model.parameters(), 50)
         # print("total_norm_after: ", total_norm)
         optimizer.step()
         self._update_metrics(output, target, loss, filter='train')
@@ -74,7 +72,6 @@ class BayesianWrapper(ModelWrapper):
         Returns:
             Tensor, the loss computed from the criterion.
         """
-        beta = self.beta / data.size(0)
         with torch.no_grad():
             if cuda:
                 data, target = data.cuda(), target.cuda()
@@ -94,3 +91,59 @@ class BayesianWrapper(ModelWrapper):
             reset(child)
 
         self.model.apply(reset)
+
+    def train_and_test_on_datasets(self, train_dataset: Dataset, test_dataset: Dataset,
+                                   optimizer: Optimizer, batch_size: int, epoch: int,
+                                   use_cuda: bool,
+                                   workers: int = 4,
+                                   collate_fn: Optional[Callable] = None,
+                                   return_best_weights=False,
+                                   patience=None,
+                                   min_epoch_for_es=0,
+                                   test_every=1,
+                                   lr_schedule=None):
+        """
+        Train and test the model on both Dataset `train_dataset`, `test_dataset`.
+
+        Args:
+            train_dataset (Dataset): Dataset to train on.
+            test_dataset (Dataset): Dataset to evaluate on.
+            optimizer (Optimizer): Optimizer to use during training.
+            batch_size (int): Batch size used.
+            epoch (int): number of epoch to train on.
+            use_cuda (bool): Use Cuda or not.
+            workers (int): Number of workers to use.
+            collate_fn (Optional[Callable]): The collate function to use.
+            return_best_weights (bool): If True, will keep the best weights and return them.
+            patience (Optional[int]): If provided, will use early stopping to stop after
+                                        `patience` epoch without improvement.
+            min_epoch_for_es (int): Epoch at which the early stopping starts.
+
+        Returns:
+            History and best weights if required.
+        """
+        best_weight = None
+        best_loss = 1e10
+        best_epoch = 0
+        hist = []
+        for e in range(epoch):
+            _ = self.train_on_dataset(train_dataset, optimizer, batch_size, test_every,
+                                      use_cuda, workers, collate_fn)
+            te_loss = self.test_on_dataset(test_dataset, batch_size, use_cuda, workers, collate_fn)
+            if lr_schedule:
+                lr_schedule.step()
+            hist.append({k: v.value for k, v in self.metrics.items()})
+            if te_loss < best_loss:
+                best_epoch = e
+                best_loss = te_loss
+                if return_best_weights:
+                    best_weight = deepcopy(self.state_dict())
+
+            if patience is not None and (e - best_epoch) > patience and (e > min_epoch_for_es):
+                # Early stopping
+                break
+
+        if return_best_weights:
+            return hist, best_weight
+        else:
+            return hist

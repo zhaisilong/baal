@@ -12,6 +12,10 @@ import torch.nn.functional as F
 from torch.nn import Parameter
 
 
+def calculate_kl(log_alpha):
+    return 0.5 * torch.sum(torch.log1p(torch.exp(-log_alpha)))
+
+
 class BayesianLayer(nn.Module):
     """ Bayesian wrapper for Fully connected and Convolution Layers.
     Args:
@@ -22,23 +26,23 @@ class BayesianLayer(nn.Module):
 
     """
 
-    def __init__(self, layer, q_logvar_init=0.5, p_logvar_init=0.5):
-        super(BayesianLayer, self).__init__()
-
-        self.q_logvar_init = torch.as_tensor(q_logvar_init)
-        self.p_logvar_init = torch.as_tensor(p_logvar_init)
-
+    def __init__(self, layer, alpha_shape=(1, 1), use_bias=False):
+        super().__init__()
+        self.log_alpha = Parameter(torch.Tensor(*alpha_shape))
         self.layer = deepcopy(layer)
-        self.weight_mu = Parameter(torch.zeros_like(self.layer.weight))
-        self.weight_sigma = Parameter(torch.ones_like(self.layer.weight))
-        self.register_buffer('eps_weight', torch.ones_like(self.layer.weight))
+        self.weight = Parameter(torch.zeros_like(self.layer.weight))
+        if use_bias:
+            self.bias = Parameter(torch.ones_like(self.layer.bias))
+        else:
+            self.bias = None
         self.reset_parameters()
 
     def reset_parameters(self):
-        stdv = math.sqrt(1. / self.weight_mu.size(1))
-        self.weight_mu.data.uniform_(-stdv, stdv)
-        self.weight_sigma.data.fill_(self.p_logvar_init)
-        self.eps_weight.data.zero_()
+        stdv = 1. / math.sqrt(sum(self.weight.size()[1:]))
+        self.weight.data.uniform_(-stdv, stdv)
+        if self.bias is not None:
+            self.bias.data.uniform_(-stdv, stdv)
+        self.log_alpha.data.fill_(-5.0)
 
     def forward(self, x):
         """
@@ -52,11 +56,14 @@ class BayesianLayer(nn.Module):
         raise NotImplementedError
 
     def regularization(self):
-        sig_weight = torch.exp(self.weight_sigma)
-        kl_ = math.log(self.q_logvar_init) - self.weight_sigma + \
-              (sig_weight ** 2 + self.weight_mu ** 2) / (2 * self.q_logvar_init ** 2) - 0.5
-        kl = kl_.sum()
+        kl = self.weight.nelement() / self.log_alpha.nelement() * calculate_kl(self.log_alpha)
         return kl
+
+    def get_kwargs(self):
+        kwargs = self.layer.__dict__
+        wanted = ['stride', 'dilation', 'padding', 'groups']
+        kwargs = {k: v for k, v in kwargs.items() if k in wanted}
+        return kwargs
 
 
 class LinearBayesianLayer(BayesianLayer):
@@ -71,10 +78,18 @@ class LinearBayesianLayer(BayesianLayer):
         Returns:
             x (Tensor): output
         """
-        sig_weight = torch.exp(self.weight_sigma)
-        weight = self.weight_mu + sig_weight * self.eps_weight.normal_()
-        x = F.linear(x, weight, bias=None)
-        return x
+        mean = F.linear(x, self.weight)
+        if self.bias is not None:
+            mean = mean + self.bias
+
+        sigma = torch.exp(self.log_alpha) * self.weight * self.weight
+
+        std = torch.sqrt(1e-16 + F.linear(x * x, sigma))
+        epsilon = std.data.new(std.size()).normal_()
+        # Local reparameterization trick
+        out = mean + std * epsilon
+
+        return out
 
 
 class Conv1dBayesianLayer(BayesianLayer):
@@ -89,8 +104,8 @@ class Conv1dBayesianLayer(BayesianLayer):
         Returns:
             x (Tensor): output
         """
-        sig_weight = torch.exp(self.weight_sigma)
-        weight = self.weight_mu + sig_weight * self.eps_weight.normal_()
+        sig_weight = torch.exp(self.bias)
+        weight = self.weight + sig_weight * self.eps_weight.normal_()
         x = F.conv1d(x, weight, bias=None)
         return x
 
@@ -107,25 +122,27 @@ class Conv2dBayesianLayer(BayesianLayer):
         Returns:
             x (Tensor): output
         """
-        sig_weight = torch.exp(self.weight_sigma)
-        weight = self.weight_mu + sig_weight * self.eps_weight.normal_()
-        kwargs = self.layer.__dict__
-        wanted = ['stride', 'dilation', 'padding', 'groups']
-        kwargs = {k: v for k, v in kwargs.items() if k in wanted}
-        x = F.conv2d(x, weight, bias=None, **kwargs)
-        return x
+        kwargs = self.get_kwargs()
+
+        mean = F.conv2d(x, self.weight, self.bias, **kwargs)
+
+        sigma = torch.exp(self.log_alpha) * self.weight * self.weight
+
+        std = torch.sqrt(1e-16 + F.conv2d(x * x, sigma, bias=None, **kwargs))
+        epsilon = std.data.new(std.size()).normal_()
+
+        out = mean + std * epsilon
+
+        return out
 
 
-def patch_module(module: torch.nn.Module, q_logvar_init=1.0, p_logvar_init=1.0,
-                 inplace: bool = True, types='all') -> torch.nn.Module:
+def patch_module(module: torch.nn.Module, inplace: bool = True, types='all') -> torch.nn.Module:
     """Replace last layer in a model with Bayesian layer.
 
     Args:
-        types (str): One of 'all', 'linear', 'conv', the type of layers to modifies.
+        types:
         module (torch.nn.Module):
             The module in which you would like to replace dropout layers.
-        q_logvar_init (float): initial value for variance of q
-        p_logvar_init (float): initial value for variance of p
         inplace (bool, optional):
             Whether to modify the module in place or return a copy of the module.
 
@@ -137,14 +154,12 @@ def patch_module(module: torch.nn.Module, q_logvar_init=1.0, p_logvar_init=1.0,
     if not inplace:
         module = copy.deepcopy(module)
 
-    _patch_bayesian_layers(module, q_logvar_init=q_logvar_init, p_logvar_init=p_logvar_init,
-                           types=types)
+    _patch_bayesian_layers(module, types=types)
 
     return module
 
 
-def _patch_bayesian_layers(module: torch.nn.Module, q_logvar_init=1.0, p_logvar_init=1.0,
-                           types='all') -> None:
+def _patch_bayesian_layers(module: torch.nn.Module, types='all') -> None:
     """
     Recursively iterate over the children of a module and find the last
     layer to be wrapped by BayesianLayer.
@@ -155,19 +170,13 @@ def _patch_bayesian_layers(module: torch.nn.Module, q_logvar_init=1.0, p_logvar_
         new_module = None
         if isinstance(child, nn.Linear) and types in ['all', 'linear']:
             layer_met = True
-            new_module = LinearBayesianLayer(child,
-                                             q_logvar_init=q_logvar_init,
-                                             p_logvar_init=p_logvar_init)
+            new_module = LinearBayesianLayer(child)
         elif isinstance(child, nn.Conv2d) and types in ['all', 'conv']:
             layer_met = True
-            new_module = Conv2dBayesianLayer(child,
-                                             q_logvar_init=q_logvar_init,
-                                             p_logvar_init=p_logvar_init)
+            new_module = Conv2dBayesianLayer(child)
         elif isinstance(child, nn.Conv1d) and types in ['all', 'conv']:
             layer_met = True
-            new_module = Conv1dBayesianLayer(child,
-                                             q_logvar_init=q_logvar_init,
-                                             p_logvar_init=p_logvar_init)
+            new_module = Conv1dBayesianLayer(child)
 
         if isinstance(child, nn.Dropout):
             new_module = torch.nn.Dropout(p=0)
@@ -189,10 +198,9 @@ class BayesianModel(nn.Module):
 
     """
 
-    def __init__(self, model: nn.Module, q_logvar_init=1.0, p_logvar_init=1.0, types='all'):
+    def __init__(self, model: nn.Module, types='all'):
         super(BayesianModel, self).__init__()
-        self.model = patch_module(model, q_logvar_init=q_logvar_init, p_logvar_init=p_logvar_init,
-                                  types=types)
+        self.model = patch_module(model, types=types)
 
     def forward(self, x):
         return self.model(x)
