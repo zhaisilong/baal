@@ -24,6 +24,7 @@ jobs:
           command: |
             pip config set global.progress_bar off
             pip install --upgrade pip
+            pip install torch-hypothesis==0.1.1 --no-deps
             pip install -r test-requirements.txt
             pip install -e .[nlp]
 
