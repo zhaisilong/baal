@@ -112,14 +112,14 @@ def main():
     # weights = load_state_dict_from_url('https://download.pytorch.org/models/vgg16-397923af.pth')
     # weights = {k: v for k, v in weights.items() if 'classifier.6' not in k}
     # model.load_state_dict(weights, strict=False)
-    # print(list(model.named_modules()))
+    print(list(model.named_modules()))
 
     if use_cuda:
         model.cuda()
     optimizer = optim.SGD(model.parameters(), lr=hyperparams["lr"], momentum=0.9)
 
     # Wraps the model into a usable API.
-    model = ModelWrapper(model, criterion, embedding_layer="classifier.6")
+    model = ModelWrapper(model, criterion, embedding_layer="classifier.3")
 
     logs = {}
     logs['epoch'] = 0

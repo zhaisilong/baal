@@ -6,6 +6,7 @@ from typing import Callable, Optional
 import numpy as np
 import structlog
 import torch
+from torch.nn.functional import cross_entropy
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.dataloader import default_collate
@@ -108,7 +109,7 @@ class ModelWrapper:
         embedding_gradients = []
         for data, _ in DataLoader(dataset, batch_size, True, num_workers=0,
                                        collate_fn=collate_fn):
-            embedding_gradients.append(self.get_embedding_grads_on_batch(data, optimizer, use_cuda))
+            embedding_gradients.append(self.get_embedding_grads_on_batch(data, optimizer, use_cuda).detach().clone().cpu())
 
         return np.vstack(embedding_gradients)
 
@@ -364,28 +365,26 @@ class ModelWrapper:
             # no targets are here! we use this function in inference.
             data = to_cuda(data)
         optimizer.zero_grad()
-        embedding_list = []
-        embedding_gradients = []
-        handle = register_embedding_list_hook(self.model, embedding_list, self.embedding_layer)
-        # [embd(device=cuda, requires_grad=True) for embd in embedding_list]
-        hook = register_embedding_gradient_hooks(self.model, embedding_gradients, self.embedding_layer)
+        embeddings = []
+        # embedding_gradients = []
+        embd_hook = register_embedding_list_hook(self.model, embeddings, self.embedding_layer)
+        # hook = register_embedding_gradient_hooks(self.model, embedding_gradients, self.embedding_layer)
         output = self.model(data)
         model_preds = torch.argmax(output, 1)
+        loss = cross_entropy(output, model_preds)
+        embeddings = torch.stack(embeddings, dim=0)
+        # embeddings.requires_grad = True
 
-        # # print("before", embedding_list)
-        # # prep embedding list
-        embedding_list = torch.cat(embedding_list)
-        # embedding_list.requires_grad = True
-        # if cuda
-        #     embedding_list = to_cuda(embedding_list)
-
-        # print("embedding after", embedding_list)
-        loss = self.criterion(embedding_list, model_preds)
-        loss.backward()
-        print("gradient after", embedding_gradients)
-        handle.remove()
-        hook.remove()
-        return embedding_gradients
+        # loss forward backward backward  retain_grads=True
+        print("embedding shape", embeddings.shape)
+        gradients = torch.autograd.grad(loss, output, allow_unused=True)[0]
+        # loss.backward(retain_graph=False)
+        print("gradients calculated", gradients)
+        # print("did we get embeding gards?", embedding_gradients)
+        embd_hook.remove()
+        # hook.remove()
+        # The gradient calculation using hooks and autograd is different and I dont know why
+        return gradients
 
     def train_on_batch(self, data, target, optimizer, cuda=False,
                        regularizer: Optional[Callable] = None):
