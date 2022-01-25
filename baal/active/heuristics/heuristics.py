@@ -569,7 +569,8 @@ class BADGE(AbstractHeuristic):
         embedding_grads = self.reduction(embedding_grads)
         assert embedding_grads.ndim == 2
         ranks = self.init_centers(embedding_grads)
-        return ranks
+        uncertainties = ['empty']
+        return ranks, uncertainties
 
 
 class Variance(AbstractHeuristic):

@@ -6,7 +6,6 @@ from typing import Callable, Optional
 import numpy as np
 import structlog
 import torch
-from torch.nn.functional import cross_entropy
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.dataloader import default_collate
@@ -16,7 +15,6 @@ from baal.utils.array_utils import stack_in_memory, to_prob
 from baal.utils.cuda_utils import to_cuda
 from baal.utils.iterutils import map_on_tensor
 from baal.utils.metrics import Loss
-from baal.utils.graddient_embeddings import register_embedding_gradient_hooks, register_embedding_list_hook
 
 log = structlog.get_logger("ModelWrapper")
 
@@ -41,14 +39,12 @@ class ModelWrapper:
     """
 
     def __init__(self, model, criterion,
-                 embedding_layer=None,
                  replicate_in_memory=True
                  ):
         self.model = model
         self.criterion = criterion
         self.metrics = dict()
         self.add_metric('loss', lambda: Loss())
-        self.embedding_layer = embedding_layer
         self.replicate_in_memory = replicate_in_memory
 
     def add_metric(self, name: str, initializer: Callable):
@@ -90,28 +86,6 @@ class ModelWrapper:
                     v.update(loss)
                 else:
                     v.update(out, target)
-
-    def get_embedding_grads(self, dataset, optimizer, batch_size, use_cuda,
-                            collate_fn: Optional[Callable] = None):
-        """
-
-        Args:
-            data:
-            batch_size:
-            use_cuda:
-            collate_fn:
-
-        Returns:
-
-        """
-        self.train()
-        collate_fn = collate_fn or default_collate
-        embedding_gradients = []
-        for data, _ in DataLoader(dataset, batch_size, True, num_workers=0,
-                                       collate_fn=collate_fn):
-            embedding_gradients.append(self.get_embedding_grads_on_batch(data, optimizer, use_cuda).detach().clone().cpu())
-
-        return np.vstack(embedding_gradients)
 
     def train_on_dataset(
         self,
@@ -351,41 +325,6 @@ class ModelWrapper:
             return np.vstack(preds)
         return [np.vstack(pr) for pr in zip(*preds)]
 
-    def get_embedding_grads_on_batch(self, data, optimizer, cuda=False):
-        """
-
-        Args:
-            data:
-            cuda:
-
-        Returns:
-
-        """
-        if cuda:
-            # no targets are here! we use this function in inference.
-            data = to_cuda(data)
-        optimizer.zero_grad()
-        embeddings = []
-        # embedding_gradients = []
-        embd_hook = register_embedding_list_hook(self.model, embeddings, self.embedding_layer)
-        # hook = register_embedding_gradient_hooks(self.model, embedding_gradients, self.embedding_layer)
-        output = self.model(data)
-        model_preds = torch.argmax(output, 1)
-        loss = cross_entropy(output, model_preds)
-        embeddings = torch.stack(embeddings, dim=0)
-        # embeddings.requires_grad = True
-
-        # loss forward backward backward  retain_grads=True
-        print("embedding shape", embeddings.shape)
-        gradients = torch.autograd.grad(loss, output, allow_unused=True)[0]
-        # loss.backward(retain_graph=False)
-        print("gradients calculated", gradients)
-        # print("did we get embeding gards?", embedding_gradients)
-        embd_hook.remove()
-        # hook.remove()
-        # The gradient calculation using hooks and autograd is different and I dont know why
-        return gradients
-
     def train_on_batch(self, data, target, optimizer, cuda=False,
                        regularizer: Optional[Callable] = None):
         """
@@ -565,18 +504,16 @@ def mc_inference(model, data, iterations, replicate_in_memory):
     return out
 
 
-# TODO: to put it in PL and ModelWrapper and Transformers Wrapper or just a helper function ?
 def embeddings_grad_on_batch(model, data, use_cuda: bool = True):
-    """ the model needs to have a function to get the embedding results
-    before the last layer ONLY for classification now"""
+    """ """
     with torch.no_grad():
         if use_cuda:
             data = to_cuda(data)
-            out = model.get_embeddings(data)
-        probs = to_prob(model(data))
+        probs = to_prob(model(data).detach().cpu().numpy())
         model_preds = np.argmax(probs, 1)
+        out = model.get_embeddings().detach().cpu().numpy()
 
-        embedding_grads = np.zeros(out.shape[0], out.shape[1] * probs.shape[1])
+        embedding_grads = np.zeros((out.shape[0], out.shape[1] * probs.shape[1]), dtype=float)
         for idx in range(probs.shape[0]):
             for lbl in range(probs.shape[1]):
                 if model_preds[idx] == lbl:
@@ -590,7 +527,7 @@ def embeddings_grad_on_batch(model, data, use_cuda: bool = True):
 
 # change to not be a generator for now
 def embeddings_grads(dataset,
-                     model: torch.nn.Module,
+                     model: ModelWrapper,
                      batch_size: int,
                      workers: int = 4,
                      use_cuda: bool = True,
@@ -602,14 +539,14 @@ def embeddings_grads(dataset,
                         batch_size,
                         False, num_workers=workers,
                         collate_fn=collate_fn)
-    model.eval()
+    model.model.eval()
     if verbose:
         loader = tqdm(loader, total=len(loader), file=sys.stdout)
 
     embeddings_grads = []
     for idx, (data, _) in enumerate(loader):
 
-        batch_grad = embeddings_grad_on_batch(model, data, use_cuda)
+        batch_grad = embeddings_grad_on_batch(model.model, data, use_cuda)
         batch_grad = map_on_tensor(lambda x: x.detach(), batch_grad)
         batch_grad = map_on_tensor(lambda x: x.cpu().numpy(), batch_grad)
         embeddings_grads.append(batch_grad)
