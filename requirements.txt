@@ -1,0 +1,4 @@
+torchvision
+baal
+lightning-flash
+lightning-flash[image]
